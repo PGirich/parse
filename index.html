@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Parse</title>
+</head>
+<style>
+  .styled-table {
+    border-collapse: collapse;
+    margin: 25px 0;
+    font-size: 0.9em;
+    font-family: sans-serif;
+    min-width: 400px;
+    box-shadow: 0 0 20px rgba(0, 0, 0, 0.15);
+  }
+  .styled-table th,
+  .styled-table td {
+    padding: 12px 15px;
+  }
+  .styled-table tbody tr {
+    border-bottom: 1px solid #dddddd;
+  }
+  .styled-table tbody tr:nth-of-type(even) {
+    background-color: #f3f3f3;
+  }
+  .styled-table tbody tr:last-of-type {
+    border-bottom: 2px solid #009879;
+  }
+</style>
+
+<body>
+  <div class="check">
+    <div>
+      Выберите файл обрабатываемых данных
+      <input type="file" id="btInpFile" />
+    </div>
+    <div>Результаты обработки данных:<br>
+      <div id="status"></div>
+      <div id="resultText"></div>
+      <button disabled="true" type="button" id="btGetRes">
+        Получить ссылку на загрузку результатов обработки
+      </button>
+      <div id="divRes"></div>
+    </div>
+  </div>
+</body>
+
+<script>
+
+// ==================================================
+  // Сервисные функции
+
+  // Показать текущий статус обработки
+  function showStatus(statusText) {
+    document.getElementById('status').innerText = statusText;
+    console.log(statusText);
+  }
+
+  // Показать результат обработки
+  function showLog(statusText) {
+    document.getElementById('resultText').innerHTML += `${statusText}<br/>`;
+    console.log(statusText);
+  }
+
+
+
+  // загрузка фрагментов
+  class ChunkReader { 
+
+    chunkCounter; // счетчик фрагментов (1...)
+    numberofChunks;
+    Readed;  // позиция фрагмента в файле 
+    fileSize; // размер файла
+    file; // объект - файл
+    buffer; // объект - фрагмент
+    bufferedStrings;
+    unfinished;
+    eof;
+    chunkSize ; //макс. размер фрагмента
+
+    // инициализация загрузки фрагментов
+    constructor (file, cp = "cp1251") {
+      this.file = file
+      this.fileSize = file.size;
+      this.codePage = cp // "cp1251" "utf-8" "cp866" https://encoding.spec.whatwg.org/#interface-textdecoder
+      this.bufferedStrings = undefined
+      this.chunkCounter = 0;
+      this.readed = 0;
+      this.eof = false
+      this.chunkSize = 200000
+      this.numberofChunks = Math.ceil(this.fileSize / this.chunkSize);
+      showLog(`<h1>Загрузка файла: ${this.file.name}, размер ${this.fileSize} bytes, размер фрагмента ${this.chunkSize},  ${this.numberofChunks} фрагментов...</h1>`);
+    }
+
+    // запуск загрузки фрагмента
+    loadChunk() {
+      return new Promise((resolve,reject)=>{
+        // вычисляем границы нового фрагмента
+        if (this.eof) { reject() ; // ошибка - закончили чтение
+        } else {
+          try {
+            this.chunkCounter++
+            let chStart = this.readed
+            let chEnd = chStart + this.chunkSize
+            this.eof = (chEnd > this.fileSize)    // если достигнут конец файла
+            if (this.eof) chEnd = this.fileSize // то читать до конца файла
+            if (chEnd<chStart) reject()
+            //showLog(`...загрузка фрагмента: ${this.chunkCounter}: ${chStart} - ${chEnd-1} ${this.eof ? " (до конца)" : ""}`);
+            // инициализируем читалку
+            let fileReader = new FileReader();
+            fileReader.onerror = (err)=>{
+                showLog(err)
+                reject(err)
+            }
+            fileReader.onload = ()=>{
+                // превращаем буфер в массив строк
+                this.buffer = new Uint8Array(fileReader.result);
+                const str = new TextDecoder(this.codePage).decode(this.buffer)
+                this.bufferedStrings = str.replace(/\r/g,'').split('\n') 
+                //  определяем наличие частично загруженных строк в конце фрагмента
+                this.unfinished = (this.buffer[this.buffer.length-1] !== 10) && (!this.eof)
+                resolve()
+            };
+            // запускаем чтение фрагмента
+            fileReader.readAsArrayBuffer(this.file.slice(chStart, chEnd));
+            this.readed += this.chunkSize
+          } catch (err) {
+            showLog(err)
+            reject(err)
+          } 
+        }
+      })
+    }
+
+    // извлечение строки
+    async getLine() {
+      try{
+        if (this.bufferedStrings === undefined) {
+          await this.loadChunk()
+        }
+        const l = this.bufferedStrings.length
+        if (l === 0) {
+          return undefined
+        }
+        if (l === 1) {
+          const str = this.bufferedStrings.shift()
+          if (this.unfinished) {
+            await this.loadChunk()
+            return str + await this.getLine()
+          } else {
+            if (!this.eof) await this.loadChunk()
+            return str
+          }
+        }
+        if (l > 1) {
+          return this.bufferedStrings.shift()
+        } 
+      } catch (e) {
+        console.dir(this)
+        throw(e)
+      }
+    }
+  }
+
+  // Инициализация вывода
+
+  // Инициализация констант и переменных
+  const arrAgr = []; // массив статистики
+  const mapAgr = new Map()
+
+  //////////////////////////////////////////////////////
+  // Обработка выбора файла описания форматов
+  document.getElementById('btInpFile').addEventListener('change', async function () {
+    showLog('<h1>Начало обработки</h1>');
+
+    // Очистка предыдущего результата
+    document.getElementById('resultText').innerText = '';
+    document.getElementById('btGetRes').disabled = true;
+    document.getElementById('divRes').innerText = '';
+    mapAgr.length = 0; // чистим содержание таблицы
+
+    // Чтение файла
+    let $input = document.getElementById('btInpFile');
+    let file = $input.files[0];
+  
+    const ch = new ChunkReader (file)
+
+    let lineCount = 0
+    let startTime = new Date()
+    let str = await ch.getLine()
+    while(str !== undefined) {
+      lineCount++
+      processLine(str)
+      str = await ch.getLine()
+      //if (lineCount>1000) break
+    }
+
+    // обработчик строки
+    function processLine(data) {
+      if (!data) return
+      const rec = data.split(';')
+      if (!Array.isArray(rec)) return
+      if (lineCount%1000 === 0 || ch.eof ) {
+        const log = `<br>Учтено записей - ${mapAgr.size} 
+                  <br>Внутренний ключ постановления в ГИБДД: ${rec[1]}
+                  <br>REGNO - Регистрационный номер ТС: ${rec[2]}
+                  <br>VIN - VIN ТС: ${rec[3]}
+                  <br>BODYNUMBER - Номер кузова (прицепа) ТС: ${rec[4]}
+                  <br>ENGINENUMBER - номер двигателя: ${rec[5]}
+                  <br>InternalKey - Ключ запрета: ${rec[6]}
+                  <br>DocNum - номер документа (штрих-код): ${rec[7]}
+                  <br>IPNUM - Номер ИП: ${rec[8]}
+                  <br>REASON - Основание (формируется на стороне ГИБДД как комплекс полей из запрета): ${rec[9]}
+                  <br>DOCSTATUS_CAPTION - Статус ИП ${rec[10]}
+                  <br>DOC_NUMBER - Рег. номера ИП: ${rec[11]}
+                  <br>ID_COURT_TYPENAME - Типа органа, выдавшего исполнительный документ: ${rec[12]}
+                  <br>ID_COURT_NAME - Органа, выдавший исполнительный документ: ${rec[13]}
+                  <br>ID_DEBTCLS_NAME - Сущности исполнения: ${rec[14]}
+                  <br>ID_DEBTTEXT - Предмета исполнения: ${rec[15]}
+                  <br>DBTRGRP - Номера сводного ИП (пусто, если нет): ${rec[16]}
+                  <br>ID_DBTR_ENTID - Тип должника (физ. лицо/юр. лицо): ${rec[17]}`
+        $res = document.getElementById('divRes')
+        $res.innerHTML = `Frag #${ch.chunkCounter} at ${ch.readed} for ${Math.floor((new Date() - startTime)/1000)} seconds. Line #${lineCount}:${log}`;
+      }
+      let subj = rec[14]
+      let organ = rec[12]
+      let ipStatus = rec[10]
+      // группы предметов исполнения
+      let subjG = ''
+      if (new Set(['Наложение ареста','Обеспечительная мера неимущественного характера']).has(subj)) {
+        subjG = `[Обеспечительная мера]`
+      } else if (new Set(['','Иной вид исполнения неимущественного характера','Иной вид исполнения имущественного характера']).has(subj)) {
+        subjG = `[Возможно обеспечительная мера]`
+      } else {
+        subjG = `[Точно не обеспечительная мера]`
+      }
+      // группы ОВИД
+      let organG = ''
+      if (new Set(['Мировой судья','Районный (городской) суд','Суд общей юрисдикции',
+        'Судебный орган иностранного государства','Судебный орган Республики Беларусь (хозяйствующие субъекты)',
+        'Верховный суд рф, верховный суд республики, краевой и областной суд']).has(organ)) {
+        organG = `[Судебный орган]`
+      } else if (new Set(['']).has(organ)) {
+        organG = `[Возможно судебный орган]`
+      } else {
+        organG = `[Точно не судебный]`
+      }
+      // группы статусов ИП
+      let ipStatusG = ''
+      if (new Set(['В исполнении','Приостановлен','Отложено','Рассрочка исполнения','Приостановлено','Исполнение отсрочено']).has(ipStatus)) {
+        ipStatusG = `[В исполнении]`
+      } else if (new Set(['Окончено','Завершено','Прекращено','Отказан']).has(ipStatus)) {
+        ipStatusG = `[Завершено]`
+      } else { // ['','Передано в другое ОСП','Новый','Возбуждение ИП отменено']
+        ipStatusG = `[Странная шняга]`
+      }
+
+      // учет в статистику 
+      const key = subjG+'</td><td>'+organG+'</td><td>'+ipStatusG
+      mapAgr.set(key, (mapAgr.get(key) || 0) + 1)
+    }
+
+    // вывод результата
+    showLog(`<h1>Чтение файла завершено</h1>`);
+
+    let outText = `<table class="styled-table">
+      <thead><tr>
+            <th>Кол-во</th>
+            <th>Относится к обеспечительной мере</th>
+            <th>Тип ОВИД</th>
+            <th>Статус ИП</th>
+      </tr></thead>
+      <tbody>`
+    const mapAgrSorted = new Map([...mapAgr.entries()].sort((a, b) => b[1] - a[1]));
+    console.log(mapAgr)
+    console.log(mapAgrSorted)
+    mapAgrSorted.forEach( (key,value) => outText += `<tr><td>${key}</td><td>${value}</td></tr>`)
+    showLog(`Статистика:`);
+    showLog(outText+'</tbody></table>')
+
+    //document.getElementById('btGetRes').disabled = false;
+    document.getElementById('divRes').innerHTML=''
+  })
+
+
+
+  //////////////////////////////////////////////////////
+  // формирование файла результата обработки
+  showLog('Инициализация обработчика для подготовки результата обработки');
+  sRes = 'Результат обработки.'
+  document.getElementById('btGetRes').addEventListener('click', function () {
+    showLog('Начало процедуры формирования файла результата обработки');
+    let refDownload = document.getElementById('refDownload');
+    var taBlob = new Blob([sRes], { type: 'text/plain' });
+    refDownload.setAttribute('href', URL.createObjectURL(taBlob));
+    refDownload.setAttribute('download', `result.txt`);
+    document.getElementById('btGetRes').disabled = true;
+    showLog('Завершение процедуры формирования файла результата обработки');
+  });
+
+  // ==================================================
+  document.getElementById('btInpFile').disabled = false;
+  showLog('Инициализация завершена.');
+  showStatus('Приложение готово к работе');
+</script>
+</html>
